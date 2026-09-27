@@ -5,30 +5,64 @@ const wss = new Server({ port: PORT }, () => {
   console.log(`WebSocket server running on port ${PORT}`);
 });
 
-const clients = new Set();
+// ルームごとの状態管理マップ
+// 構造: roomName -> { isStarted: boolean, clients: Set<WebSocket> }
+const rooms = new Map();
 
-// connectionイベントの第2引数(req)から接続時のURL情報を取得できるようにする
 wss.on('connection', (ws, req) => {
-  // URLパラメータから「あいことば（room）」を取得（ない場合は空文字とする）
   const baseURL = req.headers.host ? `http://${req.headers.host}` : 'http://localhost';
   const parsedUrl = new URL(req.url, baseURL);
-  const room = parsedUrl.searchParams.get('room') || '';
+  const roomName = parsedUrl.searchParams.get('room') || 'default';
 
-  // 接続してきたクライアントオブジェクトにルーム名を記録
-  ws.room = room;
-  
-  clients.add(ws);
+  // ルーム情報が無ければ作成
+  if (!rooms.has(roomName)) {
+    rooms.set(roomName, {
+      isStarted: false,
+      clients: new Set()
+    });
+  }
+
+  const room = rooms.get(roomName);
+
+  // 既にゲームが始まっている場合は接続を拒否して切断
+  if (room.isStarted) {
+    ws.send(JSON.stringify({ type: 'error', message: 'room_started' }));
+    ws.close();
+    return;
+  }
+
+  // ルームにクライアントを追加
+  ws.roomName = roomName;
+  room.clients.add(ws);
 
   ws.on('message', (message) => {
-    for (const client of clients) {
-      // 自分以外、かつ接続中、かつ「同じルーム（あいことば）にいる」クライアントにのみ送信
-      if (client !== ws && client.readyState === 1 && client.room === ws.room) {
+    try {
+      const data = JSON.parse(message.toString());
+      
+      // ゲーム開始メッセージを受信したら、その部屋を「進行中」にする
+      if (data.type === 'start_game') {
+        room.isStarted = true;
+      }
+    } catch (e) {
+      // JSON解析エラー時はそのまま通過
+    }
+
+    // 同じルーム内の自分以外のクライアントへメッセージを転送
+    for (const client of room.clients) {
+      if (client !== ws && client.readyState === 1) {
         client.send(message.toString());
       }
     }
   });
 
   ws.on('close', () => {
-    clients.delete(ws);
+    if (room) {
+      room.clients.delete(ws);
+
+      // ルーム内の人数が0人になったらルームを削除（状態リセット）
+      if (room.clients.size === 0) {
+        rooms.delete(roomName);
+      }
+    }
   });
 });
