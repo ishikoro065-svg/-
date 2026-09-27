@@ -35,10 +35,16 @@ wss.on('connection', (ws, req) => {
   ws.roomName = roomName;
   room.clients.add(ws);
 
+  // 生存確認用：接続した時刻を記録
+  ws.lastActive = Date.now();
+
   // 参加成功メッセージを返信
   ws.send(JSON.stringify({ type: 'join_success' }));
 
   ws.on('message', (message) => {
+    // どんなメッセージでも届いたら「まだ生きている」として時刻を更新
+    ws.lastActive = Date.now();
+
     try {
       const data = JSON.parse(message.toString());
       
@@ -69,3 +75,14 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+
+// 5秒ごとに全クライアントの生存確認を実行
+setInterval(() => {
+  const now = Date.now();
+  wss.clients.forEach((ws) => {
+    // 20秒間何の通信も送ってこないクライアントは強制切断（タブ閉じやスリープ対策）
+    if (now - ws.lastActive > 20000) {
+      ws.terminate();
+    }
+  });
+}, 5000);
