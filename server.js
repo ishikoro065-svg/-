@@ -35,6 +35,9 @@ wss.on('connection', (ws, req) => {
   ws.roomName = roomName;
   room.clients.add(ws);
 
+  // 参加成功メッセージを返信
+  ws.send(JSON.stringify({ type: 'join_success' }));
+
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message.toString());
