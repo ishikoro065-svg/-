@@ -81,8 +81,8 @@ setInterval(() => {
   const now = Date.now();
   wss.clients.forEach((ws) => {
     // 20秒間何の通信も送ってこないクライアントは強制切断（タブ閉じやスリープ対策）
-    if (now - ws.lastActive > 20000) {
+    if (now - ws.lastActive > 9000) {
       ws.terminate();
     }
   });
-}, 5000);
+}, 3000);
