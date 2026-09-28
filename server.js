@@ -5,8 +5,6 @@ const wss = new Server({ port: PORT }, () => {
   console.log(`WebSocket server running on port ${PORT}`);
 });
 
-// ルームごとの状態管理マップ
-// 構造: roomName -> { isStarted: boolean, clients: Set<WebSocket> }
 const rooms = new Map();
 
 wss.on('connection', (ws, req) => {
@@ -14,7 +12,6 @@ wss.on('connection', (ws, req) => {
   const parsedUrl = new URL(req.url, baseURL);
   const roomName = parsedUrl.searchParams.get('room') || 'default';
 
-  // ルーム情報が無ければ作成
   if (!rooms.has(roomName)) {
     rooms.set(roomName, {
       isStarted: false,
@@ -24,39 +21,35 @@ wss.on('connection', (ws, req) => {
 
   const room = rooms.get(roomName);
 
-  // 既にゲームが始まっている場合は接続を拒否して切断
   if (room.isStarted) {
     ws.send(JSON.stringify({ type: 'error', message: 'room_started' }));
     ws.close();
     return;
   }
 
-  // ルームにクライアントを追加
   ws.roomName = roomName;
   room.clients.add(ws);
 
-  // 生存確認用：接続した時刻を記録
-  ws.lastActive = Date.now();
+  // ★1. 生存フラグを管理
+  ws.isAlive = true;
 
-  // 参加成功メッセージを返信
+  // クライアントからpongが返ってきたら生存フラグを立てる
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
   ws.send(JSON.stringify({ type: 'join_success' }));
 
   ws.on('message', (message) => {
-    // どんなメッセージでも届いたら「まだ生きている」として時刻を更新
-    ws.lastActive = Date.now();
-
     try {
       const data = JSON.parse(message.toString());
-      
-      // ゲーム開始メッセージを受信したら、その部屋を「進行中」にする
       if (data.type === 'start_game') {
         room.isStarted = true;
       }
     } catch (e) {
-      // JSON解析エラー時はそのまま通過
+      // JSON解析エラー時
     }
 
-    // 同じルーム内の自分以外のクライアントへメッセージを転送
     for (const client of room.clients) {
       if (client !== ws && client.readyState === 1) {
         client.send(message.toString());
@@ -67,8 +60,6 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (room) {
       room.clients.delete(ws);
-
-      // ルーム内の人数が0人になったらルームを削除（状態リセット）
       if (room.clients.size === 0) {
         rooms.delete(roomName);
       }
@@ -76,13 +67,20 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// 5秒ごとに全クライアントの生存確認を実行
-setInterval(() => {
-  const now = Date.now();
+// ★2. 30秒ごとにPingを送信して生存確認と接続維持（Keep-Alive）を行う
+const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
-    // 20秒間何の通信も送ってこないクライアントは強制切断（タブ閉じやスリープ対策）
-    if (now - ws.lastActive > 9000) {
-      ws.terminate();
+    // 前回送信したPingに対してPongが返っていなければ切断
+    if (ws.isAlive === false) {
+      return ws.terminate();
     }
+
+    // フラグを一旦falseにしてからPingを送信
+    ws.isAlive = false;
+    ws.ping();
   });
-}, 3000);
+}, 30000); // 30秒周期
+
+wss.on('close', () => {
+  clearInterval(interval);
+});
