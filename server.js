@@ -5,8 +5,7 @@ const wss = new Server({ port: PORT }, () => {
   console.log(`WebSocket server running on port ${PORT}`);
 });
 
-// ルームごとの状態管理マップ
-// 構造: roomName -> { isStarted: boolean, clients: Set<WebSocket> }
+// ルーム管理マップ: roomName -> { isStarted: boolean, clients: Set<WebSocket> }
 const rooms = new Map();
 
 wss.on('connection', (ws, req) => {
@@ -24,7 +23,7 @@ wss.on('connection', (ws, req) => {
 
   const room = rooms.get(roomName);
 
-  // 既にゲームが始まっている場合は接続を拒否して切断
+  // 既にゲームが始まっている場合は拒否
   if (room.isStarted) {
     ws.send(JSON.stringify({ type: 'error', message: 'room_started' }));
     ws.close();
@@ -35,28 +34,49 @@ wss.on('connection', (ws, req) => {
   ws.roomName = roomName;
   room.clients.add(ws);
 
-  // 生存フラグとプレイヤーIDの保持
   ws.isAlive = true;
   ws.myPlayerId = null;
+  ws.myPlayerName = 'Unknown';
 
-  // クライアントからpongが返ってきたら生存フラグを立てる
   ws.on('pong', () => {
     ws.isAlive = true;
   });
 
-  // 参加成功メッセージを返信
+  // 接続成功メッセージ
   ws.send(JSON.stringify({ type: 'join_success' }));
 
-  // 共通の離脱処理（メッセージ受信時・closeイベント時の両方から呼ばれる）
+  // ★部屋の全プレイヤーへ参加者リスト（ID・名前）を配信する共通関数
+  const broadcastMemberList = () => {
+    const members = [];
+    for (const client of room.clients) {
+      if (client.myPlayerId) {
+        members.push({
+          id: client.myPlayerId,
+          name: client.myPlayerName || 'Unknown'
+        });
+      }
+    }
+
+    const memberListMsg = JSON.stringify({
+      type: 'member_list',
+      members: members
+    });
+
+    for (const client of room.clients) {
+      if (client.readyState === 1) { // OPEN
+        client.send(memberListMsg);
+      }
+    }
+  };
+
+  // ★共通の離脱処理（メッセージ受信時およびcloseイベント時に実行）
   const handleUserLeave = (leavingPlayerId) => {
     if (!room.clients.has(ws)) return;
 
-    // 1. 部屋のクライアント一覧から削除
     room.clients.delete(ws);
-
     const targetId = leavingPlayerId || ws.myPlayerId;
 
-    // 2. 他のプレイヤーに「離脱通知」を即時転送（相手画面から0秒で敵メッシュを消す）
+    // 他の全プレイヤーへ切断通知（0秒で画面からメッシュを消す）
     if (targetId) {
       const disconnectMsg = JSON.stringify({
         type: 'disconnect',
@@ -64,17 +84,19 @@ wss.on('connection', (ws, req) => {
       });
 
       for (const client of room.clients) {
-        if (client.readyState === 1) { // 1 = OPEN
+        if (client.readyState === 1) {
           client.send(disconnectMsg);
         }
       }
     }
 
-    // 3. 部屋の人数チェック
+    // 最新のメンバーリストを全員に再配布
+    broadcastMemberList();
+
+    // 部屋に誰もおらなくなった場合は部屋消去、残っている場合は再スタート可能にする
     if (room.clients.size === 0) {
       rooms.delete(roomName);
     } else {
-      // まだ誰か残っている場合はゲーム進行中フラグを落として再戦できるようにする
       room.isStarted = false;
     }
   };
@@ -83,20 +105,24 @@ wss.on('connection', (ws, req) => {
     try {
       const data = JSON.parse(message.toString());
 
-      // プレイヤーIDが流れてきたらソケットに保持（close時の保険）
-      if (data.id) {
-        ws.myPlayerId = data.id;
+      if (data.id) ws.myPlayerId = data.id;
+      if (data.name) ws.myPlayerName = data.name;
+
+      // ★参加時や名前登録時にメンバーリストを即座に更新・全員に配信
+      if (data.type === 'join' || data.type === 'register_name') {
+        broadcastMemberList();
+        return;
       }
 
-      // ゲーム開始メッセージの受け取り
+      // ゲーム開始メッセージ
       if (data.type === 'start_game') {
         room.isStarted = true;
       }
 
-      // 明示的な離脱メッセージの受け取り（タイトルに戻る・タブ閉じ時）
+      // 離脱メッセージを受け取った場合（タイトルへ戻る、ボタン操作等）
       if (data.type === 'disconnect') {
         handleUserLeave(data.id);
-        ws.close(); // サーバー側からも即座にソケットを閉じる
+        ws.close();
         return;
       }
     } catch (e) {
@@ -111,7 +137,7 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // ソケット切断時（ネットワーク切断、ブラウザ終了時）
+  // ソケット切断時（タブ閉じ、通信断など）
   ws.on('close', () => {
     if (rooms.has(roomName)) {
       handleUserLeave(ws.myPlayerId);
@@ -119,13 +145,12 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// 30秒ごとにPingを送信して生存確認と接続維持（Keep-Alive）を実行
+// 30秒ごとにPingを送信して生存確認（Keep-Alive）
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
       return ws.terminate();
     }
-
     ws.isAlive = false;
     ws.ping();
   });
