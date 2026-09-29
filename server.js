@@ -23,23 +23,23 @@ wss.on('connection', (ws, req) => {
 
   const room = rooms.get(roomName);
 
-  // ★ 変更点: 既にゲームが始まっている場合は「観戦者」として参加させる（拒否・切断しない）
+  // ★ ゲームが既に開始されている場合は観戦者(isSpectator)として扱う
   const isSpectator = room.isStarted;
 
-  // ルームにクライアントを追加
+  // クライアント状態の保持
   ws.roomName = roomName;
-  ws.isSpectator = isSpectator; // 観戦者フラグを保持
-  room.clients.add(ws);
-
+  ws.isSpectator = isSpectator;
   ws.isAlive = true;
   ws.myPlayerId = null;
   ws.myPlayerName = 'Unknown';
+
+  room.clients.add(ws);
 
   ws.on('pong', () => {
     ws.isAlive = true;
   });
 
-  // 接続成功メッセージ（本人が観戦者かどうかを通知）
+  // 1. 接続成功通知（自分が観戦者かどうかを送る）
   ws.send(JSON.stringify({ 
     type: 'join_success',
     isSpectator: isSpectator
@@ -77,7 +77,7 @@ wss.on('connection', (ws, req) => {
     room.clients.delete(ws);
     const targetId = leavingPlayerId || ws.myPlayerId;
 
-    // 他の全プレイヤーへ切断通知
+    // 他の全プレイヤーへ切断通知（0秒で画面からメッシュを消す）
     if (targetId) {
       const disconnectMsg = JSON.stringify({
         type: 'disconnect',
@@ -113,19 +113,19 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // ゲーム開始メッセージ
+      // ゲーム開始メッセージを受け取ったらフラグをオン
       if (data.type === 'start_game') {
         room.isStarted = true;
       }
 
-      // 離脱メッセージを受け取った場合
+      // 離脱メッセージを受け取った場合（タイトルへ戻る、ボタン操作等）
       if (data.type === 'disconnect') {
         handleUserLeave(data.id);
         ws.close();
         return;
       }
 
-      // ★ 観戦者の操作制限（位置同期・攻撃メッセージを他人に転送しない）
+      // ★ 観戦者の場合、移動（transform）や攻撃（shoot/hit）メッセージを他人に転送しない
       if (ws.isSpectator) {
         if (data.type === 'transform' || data.type === 'shoot' || data.type === 'hit') {
           return;
@@ -133,7 +133,7 @@ wss.on('connection', (ws, req) => {
       }
 
     } catch (e) {
-      // JSON解析エラー時
+      // JSON解析エラーの無効化
     }
 
     // 自分以外の同じルーム内のクライアントへ転送
