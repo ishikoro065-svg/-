@@ -23,15 +23,12 @@ wss.on('connection', (ws, req) => {
 
   const room = rooms.get(roomName);
 
-  // 既にゲームが始まっている場合は拒否
-  if (room.isStarted) {
-    ws.send(JSON.stringify({ type: 'error', message: 'room_started' }));
-    ws.close();
-    return;
-  }
+  // ★ 変更点: 既にゲームが始まっている場合は「観戦者」として参加させる（拒否・切断しない）
+  const isSpectator = room.isStarted;
 
   // ルームにクライアントを追加
   ws.roomName = roomName;
+  ws.isSpectator = isSpectator; // 観戦者フラグを保持
   room.clients.add(ws);
 
   ws.isAlive = true;
@@ -42,17 +39,21 @@ wss.on('connection', (ws, req) => {
     ws.isAlive = true;
   });
 
-  // 接続成功メッセージ
-  ws.send(JSON.stringify({ type: 'join_success' }));
+  // 接続成功メッセージ（本人が観戦者かどうかを通知）
+  ws.send(JSON.stringify({ 
+    type: 'join_success',
+    isSpectator: isSpectator
+  }));
 
-  // ★部屋の全プレイヤーへ参加者リスト（ID・名前）を配信する共通関数
+  // ★ 部屋の全プレイヤーへ参加者リスト（ID・名前・観戦フラグ）を配信する共通関数
   const broadcastMemberList = () => {
     const members = [];
     for (const client of room.clients) {
       if (client.myPlayerId) {
         members.push({
           id: client.myPlayerId,
-          name: client.myPlayerName || 'Unknown'
+          name: client.myPlayerName || 'Unknown',
+          isSpectator: !!client.isSpectator
         });
       }
     }
@@ -69,14 +70,14 @@ wss.on('connection', (ws, req) => {
     }
   };
 
-  // ★共通の離脱処理（メッセージ受信時およびcloseイベント時に実行）
+  // ★ 共通の離脱処理（メッセージ受信時およびcloseイベント時に実行）
   const handleUserLeave = (leavingPlayerId) => {
     if (!room.clients.has(ws)) return;
 
     room.clients.delete(ws);
     const targetId = leavingPlayerId || ws.myPlayerId;
 
-    // 他の全プレイヤーへ切断通知（0秒で画面からメッシュを消す）
+    // 他の全プレイヤーへ切断通知
     if (targetId) {
       const disconnectMsg = JSON.stringify({
         type: 'disconnect',
@@ -93,11 +94,9 @@ wss.on('connection', (ws, req) => {
     // 最新のメンバーリストを全員に再配布
     broadcastMemberList();
 
-    // 部屋に誰もおらなくなった場合は部屋消去、残っている場合は再スタート可能にする
+    // 部屋に誰もおらなくなった場合は部屋消去
     if (room.clients.size === 0) {
       rooms.delete(roomName);
-    } else {
-      room.isStarted = false;
     }
   };
 
@@ -108,7 +107,7 @@ wss.on('connection', (ws, req) => {
       if (data.id) ws.myPlayerId = data.id;
       if (data.name) ws.myPlayerName = data.name;
 
-      // ★参加時や名前登録時にメンバーリストを即座に更新・全員に配信
+      // 参加時や名前登録時にメンバーリストを即座に更新・全員に配信
       if (data.type === 'join' || data.type === 'register_name') {
         broadcastMemberList();
         return;
@@ -119,12 +118,20 @@ wss.on('connection', (ws, req) => {
         room.isStarted = true;
       }
 
-      // 離脱メッセージを受け取った場合（タイトルへ戻る、ボタン操作等）
+      // 離脱メッセージを受け取った場合
       if (data.type === 'disconnect') {
         handleUserLeave(data.id);
         ws.close();
         return;
       }
+
+      // ★ 観戦者の操作制限（位置同期・攻撃メッセージを他人に転送しない）
+      if (ws.isSpectator) {
+        if (data.type === 'transform' || data.type === 'shoot' || data.type === 'hit') {
+          return;
+        }
+      }
+
     } catch (e) {
       // JSON解析エラー時
     }
